@@ -168,8 +168,17 @@ namespace BitPayAPI
         public double BtcPaid { get; set; }
         public bool ShouldSerializeBtcPaid() { return false; }
 
+        public double AmountPaid { get; set; }
+        public bool ShouldSerializeAmountPaid() { return false; }
+
         public double BtcDue { get; set; }
         public bool ShouldSerializeBtcDue() { return false; }
+
+        public Dictionary<string, string> PaymentTotals { get; set; }
+        public bool ShouldSerializePaymentTotals() { return false; }
+
+        public Dictionary<string, string> PaymentSubtotals { get; set; }
+        public bool ShouldSerializePaymenSubTotals() { return false; }
 
         public List<InvoiceTransaction> Transactions { get; set; }
         public bool ShouldSerializeTransactions() { return false; }
@@ -179,6 +188,9 @@ namespace BitPayAPI
 
         public Dictionary<string, string> ExRates { get; set; }
         public bool ShouldSerializeExRates() { return false; }
+
+        public Dictionary<string, Dictionary<string, string>> ExchangeRates { get; set; }
+        public bool ShouldSerializeExchangeRates() { return false; }
 
         public string ExceptionStatus { get; set; }
         public bool ShouldSerializeExceptionStatus() { return false; }
@@ -195,6 +207,12 @@ namespace BitPayAPI
         [Newtonsoft.Json.JsonProperty]
         private Flags Flags { get; set; }
         public bool ShouldSerializeFlags() { return false; }
+
+        public string TransactionCurrency { get; set; }
+        public bool ShouldSerializeTransactionCurrency() { return false; }
+
+        public Dictionary<string, KeyValuePair<string, string>> SupportedTransactionCurrencies { get; set; }
+        public bool ShouldSerializeSupportedTransactionCurrencies() { return false; }
     }
 
     class Flags
