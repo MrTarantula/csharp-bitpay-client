@@ -5,9 +5,11 @@ using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web.Helpers;
@@ -29,30 +31,30 @@ namespace BitPayAPI
         private const String BITPAY_PLUGIN_INFO = "BitPay CSharp Client " + BITPAY_API_VERSION;
         private const String BITPAY_URL = "https://bitpay.com/";
 
-        public const String FACADE_PAYROLL  = "payroll";
+        public const String FACADE_PAYROLL = "payroll";
         public const String FACADE_POS = "pos";
         public const String FACADE_MERCHANT = "merchant";
         public const String FACADE_USER = "user";
 
         private HttpClient _httpClient = null;
         private String _baseUrl = BITPAY_URL;
-        private EcKey _ecKey = null;
         private String _identity = "";
         private String _clientName = "";
         private Dictionary<string, string> _tokenCache; // {facade, token}
+        private CngKey _key;
+        private ECDsaCng _algorithm;
 
         /// <summary>
         /// Constructor for use if the keys and SIN are managed by this library.
         /// </summary>
         /// <param name="clientName">The label for this client.</param>
         /// <param name="envUrl">The target server URL.</param>
-        public BitPay(String clientName = BITPAY_PLUGIN_INFO, String envUrl = BITPAY_URL)
+        public BitPay(String keyfile = null, String clientName = BITPAY_PLUGIN_INFO, String envUrl = BITPAY_URL)
         {
-            // IgnoreBadCertificates();
 
             if (clientName.Equals(BITPAY_PLUGIN_INFO))
             {
-                clientName += " on " + System.Environment.MachineName;
+                clientName += " on " + Environment.MachineName;
             }
             // Eliminate special characters from the client name (used as a token label).  Trim to 60 chars.
             string _clientName = new Regex("[^a-zA-Z0-9_ ]").Replace(clientName, "_");
@@ -62,30 +64,23 @@ namespace BitPayAPI
             }
 
             _baseUrl = envUrl;
-    	    _httpClient = new HttpClient();
-            _httpClient.BaseAddress = new Uri(_baseUrl);
-
-            this.initKeys();
-            this.deriveIdentity();
-            this.tryGetAccessTokens();
-        }
-
-        /// <summary>
-        /// Constructor for use if the keys and SIN were derived external to this library.
-        /// </summary>
-        /// <param name="ecKey">An elliptical curve key.</param>
-        /// <param name="clientName">The label for this client.</param>
-        /// <param name="envUrl">The target server URL.</param>
-        public BitPay(EcKey ecKey, String clientName = BITPAY_PLUGIN_INFO, String envUrl = BITPAY_URL)
-        {
-            // IgnoreBadCertificates();
-
-            _ecKey = ecKey;
-            this.deriveIdentity();
-            _baseUrl = envUrl;
             _httpClient = new HttpClient();
             _httpClient.BaseAddress = new Uri(_baseUrl);
-            this.tryGetAccessTokens();
+
+            if (String.IsNullOrWhiteSpace(keyfile))
+            {
+                using (var cngKey = CngKey.Create(CngAlgorithm.ECDiffieHellmanP521, null, new CngKeyCreationParameters { ExportPolicy = CngExportPolicies.AllowPlaintextExport }))
+                using (var fs = new FileStream("private.key", FileMode.Create, FileAccess.Write))
+                {
+                    var privateKey = cngKey.Export(CngKeyBlobFormat.EccPrivateBlob);
+                    fs.Write(privateKey, 0, privateKey.Length);
+                }
+            }
+
+            _key = CngKey.Import(File.ReadAllBytes(keyfile ?? "private.key"), CngKeyBlobFormat.EccPrivateBlob);
+            _algorithm = new ECDsaCng(_key);
+            _identity = BytesToHex(_key.Export(CngKeyBlobFormat.EccPublicBlob));
+            _tokenCache = new Dictionary<string, string>();
         }
 
         /// <summary>
@@ -115,7 +110,7 @@ namespace BitPayAPI
                 cacheToken(t.Facade, t.Value);
             }
         }
-        
+
         /// <summary>
         /// Request authorization (a token) for this client in the specified facade.
         /// </summary>
@@ -259,9 +254,9 @@ namespace BitPayAPI
             batch.Instructions = new List<PayoutInstruction>();
 
             JsonConvert.PopulateObject(this.responseToJsonString(response), batch, new JsonSerializerSettings
-                {
-                    NullValueHandling = NullValueHandling.Ignore
-                });
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            });
 
             // Track the token for this batch
             cacheToken(batch.Id, batch.Token);
@@ -279,17 +274,18 @@ namespace BitPayAPI
             parameters.Add("token", this.getAccessToken(FACADE_PAYROLL));
             HttpResponseMessage response = this.get("payouts", parameters);
             return JsonConvert.DeserializeObject<List<PayoutBatch>>(this.responseToJsonString(response), new JsonSerializerSettings
-                {
-                    NullValueHandling = NullValueHandling.Ignore
-                });
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            });
         }
-    
+
         /// <summary>
         /// Retrieve a BitPay payout batch by batch id using.  The client must have been previously authorized for the payroll facade.
         /// </summary>
         /// <param name="batchId">The id of the batch to retrieve.</param>
         /// <returns>A BitPay PayoutBatch object.</param>
-        public PayoutBatch getPayoutBatch(String batchId) {
+        public PayoutBatch getPayoutBatch(String batchId)
+        {
             Dictionary<string, string> parameters = null;
             try
             {
@@ -303,9 +299,9 @@ namespace BitPayAPI
             }
             HttpResponseMessage response = this.get("payouts/" + batchId, parameters);
             return JsonConvert.DeserializeObject<PayoutBatch>(this.responseToJsonString(response), new JsonSerializerSettings
-                {
-                    NullValueHandling = NullValueHandling.Ignore
-                });
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            });
         }
 
         /// <summary>
@@ -313,9 +309,10 @@ namespace BitPayAPI
         /// </summary>
         /// <param name="batchId">The id of the batch to cancel.</param>
         /// <returns> A BitPay generated PayoutBatch object.</param>
-        public PayoutBatch cancelPayoutBatch(String batchId) {
+        public PayoutBatch cancelPayoutBatch(String batchId)
+        {
             PayoutBatch b = getPayoutBatch(batchId);
-            
+
             Dictionary<string, string> parameters = null;
             try
             {
@@ -329,9 +326,9 @@ namespace BitPayAPI
             }
             HttpResponseMessage response = this.delete("payouts/" + batchId, parameters);
             return JsonConvert.DeserializeObject<PayoutBatch>(this.responseToJsonString(response), new JsonSerializerSettings
-                {
-                    NullValueHandling = NullValueHandling.Ignore
-                });
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            });
         }
 
         /// <summary>
@@ -397,28 +394,6 @@ namespace BitPayAPI
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-        private void initKeys()
-        {
-            if (KeyUtils.privateKeyExists())
-            {
-                _ecKey = KeyUtils.loadEcKey();
-
-                // Alternatively, load your private key from a location you specify.
-                //_ecKey = KeyUtils.createEcKeyFromHexStringFile("C:\\Users\\Andy\\Documents\\private-key.txt");
-            }
-            else
-            {
-                _ecKey = KeyUtils.createEcKey();
-                KeyUtils.saveEcKey(_ecKey);
-            }
-        }
-
-        private void deriveIdentity()
-        {
-            // Identity in this implementation is defined to be the SIN.
-            _identity = KeyUtils.deriveSIN(_ecKey);
-        }
-
         private Dictionary<string, string> responseToTokenCache(HttpResponseMessage response)
         {
             // The response is expected to be an array of key/value pairs (facade name = token).
@@ -457,7 +432,8 @@ namespace BitPayAPI
             return _tokenCache;
         }
 
-        private void clearAccessTokenCache() {
+        private void clearAccessTokenCache()
+        {
             _tokenCache = new Dictionary<string, string>();
         }
 
@@ -531,9 +507,9 @@ namespace BitPayAPI
                         fullURL += entry.Key + "=" + entry.Value + "&";
                     }
                     fullURL = fullURL.Substring(0, fullURL.Length - 1);
-                    String signature = KeyUtils.sign(_ecKey, fullURL);
+                    string signature = _algorithm.SignData(Encoding.ASCII.GetBytes(fullURL)).ToString();
                     _httpClient.DefaultRequestHeaders.Add("x-signature", signature);
-                    _httpClient.DefaultRequestHeaders.Add("x-identity", KeyUtils.bytesToHex(_ecKey.PubKey));
+                    _httpClient.DefaultRequestHeaders.Add("x-identity", _identity);
                 }
 
                 var result = _httpClient.GetAsync(fullURL).Result;
@@ -562,9 +538,9 @@ namespace BitPayAPI
                         fullURL += entry.Key + "=" + entry.Value + "&";
                     }
                     fullURL = fullURL.Substring(0, fullURL.Length - 1);
-                    String signature = KeyUtils.sign(_ecKey, fullURL);
+                    string signature = _algorithm.SignData(Encoding.ASCII.GetBytes(fullURL)).ToString();
                     _httpClient.DefaultRequestHeaders.Add("x-signature", signature);
-                    _httpClient.DefaultRequestHeaders.Add("x-identity", KeyUtils.bytesToHex(_ecKey.PubKey));
+                    _httpClient.DefaultRequestHeaders.Add("x-identity", _identity);
                 }
 
                 var result = _httpClient.DeleteAsync(fullURL).Result;
@@ -592,9 +568,9 @@ namespace BitPayAPI
                 bodyContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
                 if (signatureRequired)
                 {
-                    String signature = KeyUtils.sign(_ecKey, _baseUrl + uri + json);
+                    string signature = _algorithm.SignData(Encoding.ASCII.GetBytes(_baseUrl + uri + json)).ToString();
                     _httpClient.DefaultRequestHeaders.Add("x-signature", signature);
-                    _httpClient.DefaultRequestHeaders.Add("x-identity", KeyUtils.bytesToHex(_ecKey.PubKey));
+                    _httpClient.DefaultRequestHeaders.Add("x-identity", _identity);
                 }
                 var result = _httpClient.PostAsync(uri, bodyContent).Result;
                 return result;
@@ -652,21 +628,6 @@ namespace BitPayAPI
             return result;
         }
 
-        private void IgnoreBadCertificates()
-        {
-            System.Net.ServicePointManager.ServerCertificateValidationCallback =
-                new System.Net.Security.RemoteCertificateValidationCallback(AcceptAllCertifications);
-        }
-
-        private bool AcceptAllCertifications(
-            object sender,
-            System.Security.Cryptography.X509Certificates.X509Certificate certification,
-            System.Security.Cryptography.X509Certificates.X509Chain chain,
-            System.Net.Security.SslPolicyErrors sslPolicyErrors)
-        {
-            return true;
-        }
-
         private String unicodeToAscii(String json)
         {
             byte[] unicodeBytes = Encoding.Unicode.GetBytes(json);
@@ -674,6 +635,64 @@ namespace BitPayAPI
             char[] asciiChars = new char[Encoding.ASCII.GetCharCount(asciiBytes, 0, asciiBytes.Length)];
             Encoding.ASCII.GetChars(asciiBytes, 0, asciiBytes.Length, asciiChars, 0);
             return new String(asciiChars);
+        }
+
+        private string Sign(string str)
+        {
+            return str;
+        }
+
+        private string Identify()
+        {
+            return "";
+        }
+
+        private static int GetHexVal(char hex)
+        {
+            int val = hex;
+            return val - (val < 58 ? 48 : (val < 97 ? 55 : 87));
+        }
+        private static bool IsValidHexDigit(char chr)
+        {
+            return ('0' <= chr && chr <= '9') || ('a' <= chr && chr <= 'f') || ('A' <= chr && chr <= 'F');
+        }
+
+        public static byte[] HexToBytes(string hex)
+        {
+            if (hex == null)
+                throw new ArgumentNullException("hex");
+            if (hex.Length % 2 == 1)
+                throw new FormatException("The binary key cannot have an odd number of digits");
+
+            if (hex == string.Empty)
+                return new byte[0];
+
+            byte[] arr = new byte[hex.Length >> 1];
+
+            for (int i = 0; i < hex.Length >> 1; ++i)
+            {
+                char highNibble = hex[i << 1];
+                char lowNibble = hex[(i << 1) + 1];
+
+                if (!IsValidHexDigit(highNibble) || !IsValidHexDigit(lowNibble))
+                    throw new FormatException("The binary key contains invalid chars.");
+
+                arr[i] = (byte)((GetHexVal(highNibble) << 4) + (GetHexVal(lowNibble)));
+            }
+            return arr;
+        }
+
+        public static String BytesToHex(byte[] bytes)
+        {
+            char[] hexArray = "0123456789abcdef".ToCharArray();
+            char[] hexChars = new char[bytes.Length * 2];
+            for (int j = 0; j < bytes.Length; j++)
+            {
+                int v = bytes[j] & 0xFF;
+                hexChars[j * 2] = hexArray[(int)((uint)v >> 4)];
+                hexChars[j * 2 + 1] = hexArray[v & 0x0F];
+            }
+            return new String(hexChars);
         }
     }
 }
